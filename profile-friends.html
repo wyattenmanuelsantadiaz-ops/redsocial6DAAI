@@ -7204,7 +7204,7 @@
         <!-- /USER PREVIEW -->
       </div>
       <!-- /GRID -->
-
+      <p id="friends-no-results" style="display:none;margin-top:16px;color:#777;">No se encontraron amigos.</p>
       <!-- SECTION PAGER BAR -->
       <div class="section-pager-bar">
         <!-- SECTION PAGER -->
@@ -7315,5 +7315,207 @@
 <script src="js/form/form.utils.js"></script>
 <!-- SVG icons -->
 <script src="js/utils/svg-loader.js"></script>
-</body>
-</html>
+<!-- Friends search (client-side) -->
+<script>
+document.addEventListener('DOMContentLoaded', function(){
+  var input = document.getElementById('friends-search');
+  if(!input) return;
+  var DEBOUNCE_MS = 180;
+  var STORAGE_KEY_FILTER = 'friends-filter';
+  var STORAGE_KEY_TAB = 'friends-filter-tab';
+  var container = document.querySelector('.grid.grid-4-4-4.centered') || document.querySelector('.grid');
+  if(!container) return;
+  var itemsOriginal = Array.prototype.slice.call(container.querySelectorAll('.user-preview'));
+  // tag original index and store original displayed name for highlighting
+  itemsOriginal.forEach(function(it, i){
+    it.dataset.originalIndex = i;
+    var nameEl = it.querySelector('.user-short-description-title, .user-status-title');
+    var a = nameEl ? nameEl.querySelector('a') : null;
+    var txt = (a ? a.textContent : (nameEl ? nameEl.textContent : it.textContent)) || '';
+    it.dataset.originalName = txt.trim();
+  });
+
+  function escapeHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  function debounce(func, wait){ var t; return function(){ var args = arguments; clearTimeout(t); t = setTimeout(function(){ func.apply(null, args); }, wait); }; }
+  function applyHighlight(item, q){
+    var nameEl = item.querySelector('.user-short-description-title, .user-status-title');
+    if(!nameEl) return;
+    var a = nameEl.querySelector('a');
+    var target = a || nameEl;
+    var original = item.dataset.originalName || (target.textContent||'');
+    if(!q){ target.innerHTML = escapeHtml(original); return; }
+    var lo = original.toLowerCase();
+    var idx = lo.indexOf(q);
+    if(idx === -1){ target.innerHTML = escapeHtml(original); return; }
+    var before = original.slice(0, idx);
+    var match = original.slice(idx, idx + q.length);
+    var after = original.slice(idx + q.length);
+    target.innerHTML = escapeHtml(before) + '<mark>' + escapeHtml(match) + '</mark>' + escapeHtml(after);
+  }
+
+  // fuzzy helpers (Levenshtein + simple heuristics)
+  function levenshtein(a,b){
+    a = a || '';
+    b = b || '';
+    var m = a.length, n = b.length;
+    if(m === 0) return n;
+    if(n === 0) return m;
+    var dp = [];
+    for(var i=0;i<=m;i++){ dp[i] = [i]; }
+    for(var j=1;j<=n;j++) dp[0][j] = j;
+    for(var i=1;i<=m;i++){
+      for(var j=1;j<=n;j++){
+        var cost = a.charAt(i-1) === b.charAt(j-1) ? 0 : 1;
+        dp[i][j] = Math.min(dp[i-1][j]+1, dp[i][j-1]+1, dp[i-1][j-1]+cost);
+      }
+    }
+    return dp[m][n];
+  }
+
+  function fuzzyMatch(name, q){
+    if(!q) return true;
+    var threshold = Math.max(1, Math.floor(q.length * 0.34));
+    var words = name.split(/\s+/);
+    for(var i=0;i<words.length;i++){
+      var w = words[i].toLowerCase();
+      var d = levenshtein(w, q);
+      if(d <= threshold) return true;
+    }
+    // subsequence fallback
+    var pi = 0;
+    for(var k=0;k<name.length && pi<q.length;k++){ if(name.charAt(k) === q.charAt(pi)) pi++; }
+    return pi === q.length;
+  }
+
+  function findBestFuzzyWord(original, q){
+    var threshold = Math.max(1, Math.floor(q.length * 0.34));
+    var words = original.split(/\s+/);
+    var best = {word:null,dist:Infinity};
+    for(var i=0;i<words.length;i++){
+      var w = words[i];
+      var d = levenshtein(w.toLowerCase(), q);
+      if(d < best.dist){ best = {word:w, dist:d}; }
+    }
+    return best.dist <= threshold ? best.word : null;
+  }
+
+  function getName(item){
+    var nameEl = item.querySelector('.user-short-description-title, .user-status-title');
+    if(!nameEl) return '';
+    // prefer anchor text if present
+    var a = nameEl.querySelector('a');
+    var txt = a ? a.textContent : nameEl.textContent;
+    return (txt || '').trim().toLowerCase();
+  }
+
+  function filterFriends(){
+    var qRaw = input.value.trim();
+    var q = qRaw.toLowerCase();
+    var visibleCount = 0;
+    itemsOriginal.forEach(function(item){
+      var name = getName(item);
+      var exact = (q === '' || name.indexOf(q) !== -1);
+      var fuzzy = (!exact && q.length > 0) ? fuzzyMatch(name, q) : false;
+      var show = exact || fuzzy;
+      item.style.display = show ? '' : 'none';
+      if(show) visibleCount++;
+      if(!q){ applyHighlight(item, ''); }
+      else if(name.indexOf(q) !== -1){ applyHighlight(item, q); }
+      else if(fuzzy){
+        var original = item.dataset.originalName || '';
+        var best = findBestFuzzyWord(original, q);
+        if(best){
+          var idx = original.toLowerCase().indexOf(best.toLowerCase());
+          if(idx !== -1){
+            var before = original.slice(0, idx);
+            var match = original.slice(idx, idx + best.length);
+            var after = original.slice(idx + best.length);
+            var nameEl = item.querySelector('.user-short-description-title, .user-status-title');
+            if(nameEl){
+              var a = nameEl.querySelector('a');
+              var target = a || nameEl;
+              target.innerHTML = escapeHtml(before) + '<mark>' + escapeHtml(match) + '</mark>' + escapeHtml(after);
+            }
+          } else { applyHighlight(item, ''); }
+        } else { applyHighlight(item, ''); }
+      } else { applyHighlight(item, ''); }
+    });
+    var noResultsEl = document.getElementById('friends-no-results');
+    if(noResultsEl) noResultsEl.style.display = (visibleCount === 0) ? '' : 'none';
+  }
+
+  function applyOrder(mode){
+    var ordered = itemsOriginal.slice();
+    if(mode === '1'){
+      // Quick mode: show original DOM order (assumed newest-first in HTML)
+      ordered.sort(function(a,b){ return (a.dataset.originalIndex|0) - (b.dataset.originalIndex|0); });
+    } else if(mode === '2'){
+      // alphabetical, locale-aware and case-insensitive
+      ordered.sort(function(a,b){
+        var na = getName(a);
+        var nb = getName(b);
+        return na.localeCompare(nb, 'es', {sensitivity: 'base'});
+      });
+    }
+    ordered.forEach(function(item){ container.appendChild(item); });
+    // re-run filter to maintain visibility + no-results state after reorder
+    filterFriends();
+  }
+
+  // wire search input
+  // add clear button next to the input
+  try{
+    var clearBtn = document.createElement('button');
+    clearBtn.type = 'button';
+    clearBtn.className = 'friends-clear-btn';
+    clearBtn.title = 'Borrar búsqueda';
+    clearBtn.innerHTML = '&times;';
+    input.insertAdjacentElement('afterend', clearBtn);
+    clearBtn.addEventListener('click', function(){ input.value = ''; filterFriends(); input.focus(); });
+  }catch(e){}
+
+  // debounce user typing to reduce work and make UX smoother
+  input.addEventListener('input', debounce(filterFriends, DEBOUNCE_MS));
+  var form = input.closest('form');
+  if(form){ form.addEventListener('submit', function(e){ e.preventDefault(); filterFriends(); }); }
+
+  // wire filter select
+  var select = document.getElementById('friends-filter-category');
+  if(select){
+    // restore saved filter if present
+    try{ var saved = localStorage.getItem(STORAGE_KEY_FILTER); if(saved) select.value = saved; }catch(e){}
+    // initialize
+    applyOrder(select.value);
+    select.addEventListener('change', function(){ try{ localStorage.setItem(STORAGE_KEY_FILTER, select.value); }catch(e){}; applyOrder(select.value); });
+  }
+
+  // Sync visual filter tabs (the clickable UI above the grid) with the select
+  var tabs = document.querySelectorAll('.filter-tab');
+  if(tabs && tabs.length){
+    // set initial active tab according to saved tab -> select -> default 0
+    var activeIndex = 0;
+    try{ var savedTab = localStorage.getItem(STORAGE_KEY_TAB); if(savedTab) activeIndex = parseInt(savedTab,10); }
+    catch(e){ activeIndex = (select && select.value) ? (select.value|0) : 0; }
+    if(!isFinite(activeIndex)) activeIndex = (select && select.value) ? (select.value|0) : 0;
+    tabs.forEach(function(tt){ tt.classList.remove('active'); });
+    if(tabs[activeIndex]) tabs[activeIndex].classList.add('active');
+
+    tabs.forEach(function(tab, idx){
+      tab.addEventListener('click', function(){
+        tabs.forEach(function(tt){ tt.classList.remove('active'); });
+        tab.classList.add('active');
+        var mode = String(idx);
+        if(select) select.value = mode;
+        try{ localStorage.setItem(STORAGE_KEY_TAB, String(idx)); }catch(e){}
+        try{ localStorage.setItem(STORAGE_KEY_FILTER, String(idx)); }catch(e){}
+        applyOrder(mode);
+      });
+    });
+  }
+
+  // initial run
+  filterFriends();
+});
+</script>
+ </body>
+ </html>
